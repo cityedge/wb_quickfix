@@ -10,8 +10,8 @@ from typing import Optional
 import numpy as np
 from PIL import Image, ImageOps
 
-from PySide6.QtCore import Qt, QTimer, Signal, QPointF, QEvent, QSettings
-from PySide6.QtGui import QAction, QColor, QCursor, QImage, QKeySequence, QPixmap
+from PySide6.QtCore import Qt, QTimer, Signal, QPointF, QRectF, QEvent, QSettings
+from PySide6.QtGui import QAction, QColor, QCursor, QImage, QKeySequence, QPixmap, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -48,7 +48,7 @@ from core import (
 
 
 APP_NAME = "WB QuickFix"
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 PREVIEW_MAX_DIM = 1800
 SAMPLE_SIZE = 11
 
@@ -63,7 +63,7 @@ TEXT = {
         "wb": "ホワイトバランス",
         "auto_wb": "自動WB",
         "white_pick": "白を指定",
-        "skin_pick": "肌を指定（実験）",
+        "skin_pick": "肌色を指定（実験）",
         "temperature": "色温度",
         "tint": "色偏差",
         "naturalize": "自然補正",
@@ -82,7 +82,7 @@ TEXT = {
         "status_loaded": "読み込み: {name}  ({w} × {h})",
         "status_white": "白基準: RGB {r}, {g}, {b}  →  色温度 {temp:+d} / 色偏差 {tint:+d} / 自然補正 {nat}",
         "status_auto": "自動WB基準: RGB {r}, {g}, {b}  →  色温度 {temp:+d} / 色偏差 {tint:+d} / 自然補正 {nat}",
-        "status_skin": "肌基準（実験）: RGB {r}, {g}, {b}  →  色温度 {temp:+d} / 色偏差 {tint:+d} / 自然補正 {nat}",
+        "status_skin": "肌色基準（実験）: RGB {r}, {g}, {b}  →  色温度 {temp:+d} / 色偏差 {tint:+d} / 自然補正 {nat}",
         "sample_dark": "サンプルが暗すぎます。結果が不安定になる可能性があります。",
         "sample_clip": "サンプルが白飛びに近いため、色かぶり情報が少ない可能性があります。",
         "save_ok": "保存しました: {name}",
@@ -110,7 +110,7 @@ TEXT = {
         "wb": "White Balance",
         "auto_wb": "Auto WB",
         "white_pick": "Pick White",
-        "skin_pick": "Pick Skin (Experimental)",
+        "skin_pick": "Pick Skin Tone (Exp.)",
         "temperature": "Temperature",
         "tint": "Tint",
         "naturalize": "Naturalize",
@@ -129,7 +129,7 @@ TEXT = {
         "status_loaded": "Loaded: {name}  ({w} × {h})",
         "status_white": "White sample: RGB {r}, {g}, {b}  →  Temperature {temp:+d} / Tint {tint:+d} / Naturalize {nat}",
         "status_auto": "Auto WB sample: RGB {r}, {g}, {b}  →  Temperature {temp:+d} / Tint {tint:+d} / Naturalize {nat}",
-        "status_skin": "Skin sample (experimental): RGB {r}, {g}, {b}  →  Temperature {temp:+d} / Tint {tint:+d} / Naturalize {nat}",
+        "status_skin": "Skin-tone sample (experimental): RGB {r}, {g}, {b}  →  Temperature {temp:+d} / Tint {tint:+d} / Naturalize {nat}",
         "sample_dark": "The sample is very dark; correction may be unstable.",
         "sample_clip": "The sample is near clipping, so it may contain little color-cast information.",
         "save_ok": "Saved: {name}",
@@ -287,12 +287,45 @@ class ParamControl(QWidget):
         self.label.setText(text)
 
 
+class SplitOriginalItem(QGraphicsPixmapItem):
+    """Draw only the right side of the original image during split comparison."""
+
+    def __init__(self):
+        super().__init__()
+        self._split_x: Optional[float] = None
+        self.setZValue(2)
+        self.setVisible(False)
+
+    def set_split_x(self, x: Optional[float]):
+        self._split_x = None if x is None else float(x)
+        self.setVisible(self._split_x is not None and not self.pixmap().isNull())
+        self.update()
+
+    def paint(self, painter, option, widget=None):
+        if self._split_x is None or self.pixmap().isNull():
+            return
+        rect = self.boundingRect()
+        x = max(rect.left(), min(rect.right(), self._split_x))
+        source = QRectF(x, rect.top(), max(0.0, rect.right() - x), rect.height())
+        if source.width() > 0.0:
+            painter.drawPixmap(source, self.pixmap(), source)
+
+        # A thin cosmetic divider keeps the comparison boundary visible at
+        # every zoom level without becoming visually heavy.
+        pen = QPen(QColor("#f3f5f8"))
+        pen.setWidth(1)
+        pen.setCosmetic(True)
+        painter.setPen(pen)
+        painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
+
+
 class ImageView(QGraphicsView):
     sampled = Signal(float, float, str)
     droppedFile = Signal(str)
     emptyClicked = Signal()
-    originalPressed = Signal()
-    originalReleased = Signal()
+    splitCompareStarted = Signal(float)
+    splitCompareMoved = Signal(float)
+    splitCompareEnded = Signal()
     zoomChanged = Signal(float)
 
     def __init__(self, parent=None):
@@ -314,12 +347,15 @@ class ImageView(QGraphicsView):
         self.setScene(self.scene_obj)
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene_obj.addItem(self.pixmap_item)
+        self.split_original_item = SplitOriginalItem()
+        self.scene_obj.addItem(self.split_original_item)
         self.placeholder = self.scene_obj.addText("")
         self.placeholder.setDefaultTextColor(QColor("#8b93a5"))
         self.placeholder.setZValue(5)
 
         self.sample_mode: Optional[str] = None
         self._has_image = False
+        self._split_dragging = False
 
     def set_placeholder(self, text: str):
         self.placeholder.setPlainText(text)
@@ -344,9 +380,26 @@ class ImageView(QGraphicsView):
         self._has_image = not pixmap.isNull()
         self.placeholder.setVisible(not self._has_image)
         self.scene_obj.setSceneRect(self.pixmap_item.boundingRect())
+        if not self._has_image:
+            self.clear_split_compare()
+
+    def set_original_pixmap(self, pixmap: QPixmap):
+        self.split_original_item.setPixmap(pixmap)
+        self.split_original_item.set_split_x(None)
+
+    def set_split_position(self, x: float):
+        if not self._has_image or self.split_original_item.pixmap().isNull():
+            return
+        rect = self.pixmap_item.boundingRect()
+        self.split_original_item.set_split_x(max(rect.left(), min(rect.right(), float(x))))
+
+    def clear_split_compare(self):
+        self._split_dragging = False
+        self.split_original_item.set_split_x(None)
 
     def clear_image(self):
         self.set_pixmap(QPixmap())
+        self.split_original_item.setPixmap(QPixmap())
         self.resetTransform()
 
     def fit_image(self):
@@ -389,10 +442,15 @@ class ImageView(QGraphicsView):
             event.accept()
             return
 
-        # With an image loaded, holding the right mouse button temporarily
-        # shows the untouched original, mirroring the Original button.
+        # Right-click starts a split comparison at the clicked image position:
+        # edited image on the left, untouched original on the right. Holding
+        # the button and dragging moves the split boundary horizontally.
         if self._has_image and event.button() == Qt.RightButton:
-            self.originalPressed.emit()
+            p = self.mapToScene(event.position().toPoint())
+            rect = self.pixmap_item.boundingRect()
+            if rect.contains(p):
+                self._split_dragging = True
+                self.splitCompareStarted.emit(float(p.x()))
             event.accept()
             return
 
@@ -405,15 +463,26 @@ class ImageView(QGraphicsView):
                 return
         super().mousePressEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if self._split_dragging and (event.buttons() & Qt.RightButton):
+            p = self.mapToScene(event.position().toPoint())
+            rect = self.pixmap_item.boundingRect()
+            x = max(rect.left(), min(rect.right(), p.x()))
+            self.splitCompareMoved.emit(float(x))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        if self._has_image and event.button() == Qt.RightButton:
-            self.originalReleased.emit()
+        if event.button() == Qt.RightButton and self._split_dragging:
+            self._split_dragging = False
+            self.splitCompareEnded.emit()
             event.accept()
             return
         super().mouseReleaseEvent(event)
 
     def contextMenuEvent(self, event):
-        # Right-click is reserved for press-and-hold Original comparison.
+        # Right-click is reserved for split Original comparison.
         event.accept()
 
     def _first_supported_drop_path(self, mime_data) -> Optional[str]:
@@ -525,8 +594,9 @@ class MainWindow(QMainWindow):
         self.view.sampled.connect(self.on_sampled)
         self.view.droppedFile.connect(self.load_image)
         self.view.emptyClicked.connect(self.open_dialog)
-        self.view.originalPressed.connect(self.show_original_preview)
-        self.view.originalReleased.connect(self.restore_edited_preview)
+        self.view.splitCompareStarted.connect(self.start_split_compare)
+        self.view.splitCompareMoved.connect(self.update_split_compare)
+        self.view.splitCompareEnded.connect(self.end_split_compare)
         splitter.addWidget(self.view)
 
         self.side_scroll = QScrollArea()
@@ -918,6 +988,7 @@ class MainWindow(QMainWindow):
             self.previous_state = None
             self._sync_controls_from_state()
             self._build_preview()
+            self.view.set_original_pixmap(self._to_pixmap(self.preview_rgb, self.preview_alpha))
             self.render_preview()
             self.view.fit_image()
             self.cancel_picker()
@@ -1000,6 +1071,7 @@ class MainWindow(QMainWindow):
     def show_original_preview(self):
         if self.preview_rgb is None:
             return
+        self.view.clear_split_compare()
         self._original_hold = True
         self.view.set_pixmap(self._to_pixmap(self.preview_rgb, self.preview_alpha))
 
@@ -1007,6 +1079,21 @@ class MainWindow(QMainWindow):
         self._original_hold = False
         if self.current_preview_output is not None:
             self.view.set_pixmap(self._to_pixmap(self.current_preview_output, self.preview_alpha))
+
+    def start_split_compare(self, x: float):
+        if self.preview_rgb is None or self.current_preview_output is None:
+            return
+        self._original_hold = False
+        # Ensure the base is the corrected preview; the overlay item reveals
+        # the untouched original only to the right of the split boundary.
+        self.view.set_pixmap(self._to_pixmap(self.current_preview_output, self.preview_alpha))
+        self.view.set_split_position(x)
+
+    def update_split_compare(self, x: float):
+        self.view.set_split_position(x)
+
+    def end_split_compare(self):
+        self.view.clear_split_compare()
 
     def apply_auto_wb(self):
         if self.full_rgb is None:
