@@ -48,7 +48,7 @@ from core import (
 
 
 APP_NAME = "WB QuickFix"
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 PREVIEW_MAX_DIM = 1800
 SAMPLE_SIZE = 11
 
@@ -655,7 +655,7 @@ class MainWindow(QMainWindow):
         self.side_layout.addLayout(pick_row)
 
         self.controls = {}
-        self.controls["temperature"] = ParamControl("temperature", -100, 100, 0)
+        self.controls["temperature"] = ParamControl("temperature", -200, 200, 0)
         self.controls["tint"] = ParamControl("tint", -100, 100, 0)
         self.controls["naturalize"] = ParamControl("naturalize", 0, 100, 0)
         for key in ("temperature", "tint", "naturalize"):

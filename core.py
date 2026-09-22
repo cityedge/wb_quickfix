@@ -39,7 +39,7 @@ class EditParams:
     the user can edit manually.
     """
 
-    temperature: int = 0       # -100 ... +100, relative
+    temperature: int = 0       # -200 ... +200, relative
     tint: int = 0              # -100 green ... +100 magenta
     naturalize: int = 0        # 0 ... 100
     brightness: int = 0        # -100 ... +100
@@ -161,7 +161,7 @@ def _temperature_tint_from_gains(gains: np.ndarray) -> tuple[int, int]:
     temperature = math.log(g[0] / g[2]) / 0.0070
     tint = math.log((g[0] * g[2]) / (g[1] * g[1])) / 0.0108
     return (
-        int(round(np.clip(temperature, -100.0, 100.0))),
+        int(round(np.clip(temperature, -200.0, 200.0))),
         int(round(np.clip(tint, -100.0, 100.0))),
     )
 
@@ -421,7 +421,7 @@ def auto_white_sample(
 
 def _temperature_tint_gains(temperature: float, tint: float) -> np.ndarray:
     # Relative UI controls, intentionally not pretending to be absolute Kelvin.
-    t = float(np.clip(temperature, -100.0, 100.0))
+    t = float(np.clip(temperature, -200.0, 200.0))
     q = float(np.clip(tint, -100.0, 100.0))
     gains = np.array(
         [
@@ -434,7 +434,7 @@ def _temperature_tint_gains(temperature: float, tint: float) -> np.ndarray:
     norm = float(np.dot(gains, _LUMA))
     if norm > 1e-6:
         gains /= norm
-    return np.clip(gains, 0.55, 1.80)
+    return np.clip(gains, 0.25, 4.00)
 
 
 def _skin_mask_srgb(rgb: np.ndarray) -> np.ndarray:
